@@ -347,6 +347,18 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
         BulkLoadRequest::new(&mut self.connection, columns)
     }
 
+    /// The TDS packet size this session is running with, in bytes.
+    ///
+    /// The client asks for a size in LOGIN7 ([`Config::packet_size`]); the
+    /// server answers with the size it grants in an `ENVCHANGE PacketSize`
+    /// token, which the token stream applies to the connection context.
+    /// This is that granted size — the one every request and bulk-load
+    /// packet is framed to — not the one that was requested. Before the
+    /// server has answered it is the TDS default, 4096.
+    pub fn packet_size(&self) -> u32 {
+        self.connection.context().packet_size()
+    }
+
     /// Closes this database connection explicitly.
     pub async fn close(self) -> crate::Result<()> {
         self.connection.close().await
