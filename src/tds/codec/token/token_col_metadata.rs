@@ -65,7 +65,17 @@ impl<'a> Display for MetaDataColumn<'a> {
                 VarLenType::Timen => write!(f, "time({})", ctx.len())?,
                 #[cfg(feature = "tds73")]
                 VarLenType::Datetime2 => write!(f, "datetime2({})", ctx.len())?,
-                VarLenType::Datetimen => write!(f, "datetime")?,
+                // A nullable `smalldatetime` and a nullable `datetime` share
+                // the type byte; the length tells them apart (4 or 8), as it
+                // does for `smallmoney`/`money` below.
+                VarLenType::Datetimen => match ctx.len() {
+                    4 => write!(f, "smalldatetime")?,
+                    _ => write!(f, "datetime")?,
+                },
+                VarLenType::Money => match ctx.len() {
+                    4 => write!(f, "smallmoney")?,
+                    _ => write!(f, "money")?,
+                },
                 #[cfg(feature = "tds73")]
                 VarLenType::DatetimeOffsetn => write!(f, "datetimeoffset({})", ctx.len())?,
                 VarLenType::BigVarBin => {
@@ -419,5 +429,13 @@ mod tests {
             "[t] datetimeoffset(3)"
         );
         assert_eq!(column("d", sized(VarLenType::Daten, 3)).to_string(), "[d] date");
+    }
+
+    #[test]
+    fn nullable_datetime_and_money_are_told_apart_by_their_length() {
+        assert_eq!(column("d", sized(VarLenType::Datetimen, 4)).to_string(), "[d] smalldatetime");
+        assert_eq!(column("d", sized(VarLenType::Datetimen, 8)).to_string(), "[d] datetime");
+        assert_eq!(column("m", sized(VarLenType::Money, 4)).to_string(), "[m] smallmoney");
+        assert_eq!(column("m", sized(VarLenType::Money, 8)).to_string(), "[m] money");
     }
 }
