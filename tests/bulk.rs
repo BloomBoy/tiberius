@@ -218,3 +218,96 @@ test_bulk_type!(datetime2_7(
     100,
     vec![DateTime::from_timestamp(1658524194, 123456789); 100].into_iter()
 ));
+
+/// The named columns, in the order named, with the identity column left to
+/// the server, and the statement sent `WITH (TABLOCK)`.
+#[test_on_runtimes]
+async fn bulk_load_named_columns_with_table_lock<S>(mut conn: tiberius::Client<S>) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    let table = format!("##{}", random_table().await);
+
+    conn.execute(
+        &format!(
+            "CREATE TABLE {} (id INT IDENTITY PRIMARY KEY, foo INT NOT NULL, bar FLOAT NOT NULL)",
+            table
+        ),
+        &[],
+    )
+    .await?;
+
+    let options = tiberius::BulkLoadOptions::new().table_lock(true);
+    let mut req = conn
+        .bulk_insert_with_options(&table, &["bar", "foo"], options)
+        .await?;
+
+    for i in 0..100i32 {
+        let mut row = TokenRow::new();
+        row.push((f64::from(i) / 2.0).into_sql());
+        row.push(i.into_sql());
+        req.send(row).await?;
+    }
+
+    let res = req.finalize().await?;
+    assert_eq!(100, res.total());
+
+    let row = conn
+        .query(
+            &format!("SELECT COUNT(*), MIN(id), MAX(id), SUM(foo), SUM(bar) FROM {}", table),
+            &[],
+        )
+        .await?
+        .into_row()
+        .await?
+        .unwrap();
+
+    assert_eq!(Some(100i32), row.get(0));
+    assert_eq!(Some(1i32), row.get(1), "the server numbered the identity column");
+    assert_eq!(Some(100i32), row.get(2));
+    assert_eq!(Some(4950i32), row.get(3));
+    assert_eq!(Some(2475f64), row.get(4));
+
+    Ok(())
+}
+
+/// A named column the server will not take is refused before any row is
+/// sent, by name.
+#[test_on_runtimes]
+async fn bulk_load_naming_the_identity_column_is_refused<S>(
+    mut conn: tiberius::Client<S>,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    let table = format!("##{}", random_table().await);
+
+    conn.execute(
+        &format!(
+            "CREATE TABLE {} (id INT IDENTITY PRIMARY KEY, foo INT NOT NULL)",
+            table
+        ),
+        &[],
+    )
+    .await?;
+
+    let err = conn
+        .bulk_insert_columns(&table, &["id", "foo"])
+        .await
+        .err()
+        .expect("the identity column cannot be bulk loaded");
+
+    match err {
+        tiberius::error::Error::BulkInput(msg) => assert!(msg.contains("\"id\""), "{}", msg),
+        other => panic!("expected BulkInput, got {:?}", other),
+    }
+
+    // The session is still usable: the refusal came before INSERT BULK.
+    let mut req = conn.bulk_insert_columns(&table, &["foo"]).await?;
+    let mut row = TokenRow::new();
+    row.push(7i32.into_sql());
+    req.send(row).await?;
+    assert_eq!(1, req.finalize().await?.total());
+
+    Ok(())
+}

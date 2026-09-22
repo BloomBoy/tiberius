@@ -11,6 +11,38 @@ use super::{
     HEADER_BYTES,
 };
 
+/// What a bulk load asks the server for, beyond the rows.
+///
+/// Passed to [`Client::bulk_insert_with_options`](crate::Client::bulk_insert_with_options);
+/// the default asks for nothing, which is what [`Client::bulk_insert`](crate::Client::bulk_insert)
+/// sends.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BulkLoadOptions {
+    /// Ask for a table lock for the duration of the load: the `INSERT BULK`
+    /// statement is sent `WITH (TABLOCK)`.
+    ///
+    /// The lock is what `bcp -h TABLOCK` and `SqlBulkCopyOptions.TableLock`
+    /// ask for. It is one of the conditions for minimal logging (with the
+    /// recovery model, an empty or heap target and no replication — the
+    /// server's list is "Prerequisites for minimal logging in bulk import"),
+    /// and it is exclusive: another writer on the table waits until the load
+    /// is finalized, and a load waits for anyone holding a lock on the table.
+    pub table_lock: bool,
+}
+
+impl BulkLoadOptions {
+    /// The defaults: no table lock.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set [`table_lock`](Self::table_lock).
+    pub fn table_lock(mut self, table_lock: bool) -> Self {
+        self.table_lock = table_lock;
+        self
+    }
+}
+
 /// A handler for a bulk insert data flow.
 #[derive(Debug)]
 pub struct BulkLoadRequest<'a, S>

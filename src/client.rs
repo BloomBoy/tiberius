@@ -21,7 +21,7 @@ use crate::{
         codec::{self, IteratorJoin},
         stream::{QueryStream, TokenStream},
     },
-    BulkLoadRequest, ColumnFlag, SqlReadBytes, ToSql,
+    BulkLoadOptions, BulkLoadRequest, ColumnFlag, SqlReadBytes, ToSql,
 };
 use codec::{BatchRequest, ColumnData, PacketHeader, RpcParam, RpcProcId, TokenRpcRequest};
 use enumflags2::BitFlags;
@@ -251,9 +251,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
         Ok(result)
     }
 
-    /// Execute a `BULK INSERT` statement, efficiantly storing a large number of
+    /// Execute a `BULK INSERT` statement, efficiently storing a large number of
     /// rows to a specified table. Note: make sure the input row follows the same
     /// schema as the table, otherwise calling `send()` will return an error.
+    ///
+    /// The same as [`bulk_insert_with_options`](Self::bulk_insert_with_options)
+    /// with an empty column list and the default options: every updateable
+    /// column of the table, no table lock.
     ///
     /// # Example
     ///
@@ -300,11 +304,105 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
         &'a mut self,
         table: &'a str,
     ) -> crate::Result<BulkLoadRequest<'a, S>> {
+        self.bulk_insert_with_options(table, &[], BulkLoadOptions::default())
+            .await
+    }
+
+    /// Execute a `BULK INSERT` statement into the named columns of a table.
+    ///
+    /// The same as [`bulk_insert_with_options`](Self::bulk_insert_with_options)
+    /// with the default options (no table lock). Every row sent must carry
+    /// exactly the named columns, in the order they were named; the columns
+    /// not named — an identity column, one with a default — are left to the
+    /// server. An empty `columns` means every updateable column, as
+    /// [`bulk_insert`](Self::bulk_insert).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use tiberius::{Config, IntoRow};
+    /// # use tokio_util::compat::TokioAsyncWriteCompatExt;
+    /// # use std::env;
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let c_str = env::var("TIBERIUS_TEST_CONNECTION_STRING").unwrap_or(
+    /// #     "server=tcp:localhost,1433;integratedSecurity=true;TrustServerCertificate=true".to_owned(),
+    /// # );
+    /// # let config = Config::from_ado_string(&c_str)?;
+    /// # let tcp = tokio::net::TcpStream::connect(config.get_addr()).await?;
+    /// # tcp.set_nodelay(true)?;
+    /// # let mut client = tiberius::Client::connect(config, tcp.compat_write()).await?;
+    /// let create_table = r#"
+    ///     CREATE TABLE ##bulk_test_columns (
+    ///         id INT IDENTITY PRIMARY KEY,
+    ///         foo INT NOT NULL,
+    ///         bar FLOAT NOT NULL
+    ///     )
+    /// "#;
+    ///
+    /// client.simple_query(create_table).await?;
+    ///
+    /// let mut req = client.bulk_insert_columns("##bulk_test_columns", &["foo", "bar"]).await?;
+    ///
+    /// for (i, j) in [(0i32, 0f64), (1i32, 1f64), (2i32, 2f64)] {
+    ///     req.send((i, j).into_row()).await?;
+    /// }
+    ///
+    /// let res = req.finalize().await?;
+    /// assert_eq!(3, res.total());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn bulk_insert_columns<'a>(
+        &'a mut self,
+        table: &'a str,
+        columns: &[&str],
+    ) -> crate::Result<BulkLoadRequest<'a, S>> {
+        self.bulk_insert_with_options(table, columns, BulkLoadOptions::default())
+            .await
+    }
+
+    /// Execute a `BULK INSERT` statement into the named columns of a table,
+    /// with [`BulkLoadOptions`].
+    ///
+    /// Two statements go to the server before the rows: `SELECT TOP 0
+    /// <columns> FROM <table>`, whose column metadata is what the load's own
+    /// `COLMETADATA` is built from, and `INSERT BULK <table> (<column>
+    /// <type>, …)` — followed by ` WITH (TABLOCK)` when
+    /// [`table_lock`](BulkLoadOptions::table_lock) is set. The `COLMETADATA`
+    /// lists exactly the named columns, in the order they were named, and
+    /// every row sent must follow that order; the columns not named are the
+    /// server's to fill (an identity column is numbered, a default applied).
+    /// An empty `columns` means every updateable column of the table, in the
+    /// table's order.
+    ///
+    /// A named column the server reports as not updateable — an identity
+    /// column, a computed one — is refused here with
+    /// [`Error::BulkInput`](crate::error::Error::BulkInput) naming it, before
+    /// any row is sent: a load over it could only end in a row-count
+    /// mismatch at the first `send`.
+    ///
+    /// `table` and each entry of `columns` are interpolated **verbatim** into
+    /// both statements (identifiers cannot be bound as parameters in T-SQL),
+    /// so they must be trusted or already quoted by the caller — `[dbo].[t]`,
+    /// `[Order Date]`. In the `INSERT BULK` statement the column is spelled
+    /// by the name the server reported for it, bracket-quoted.
+    pub async fn bulk_insert_with_options<'a>(
+        &'a mut self,
+        table: &'a str,
+        columns: &[&str],
+        options: BulkLoadOptions,
+    ) -> crate::Result<BulkLoadRequest<'a, S>> {
         // Start the bulk request
         self.connection.flush_stream().await?;
 
         // retrieve column metadata from server
-        let query = format!("SELECT TOP 0 * FROM {}", table);
+        let select_list = if columns.is_empty() {
+            "*".to_string()
+        } else {
+            columns.join(", ")
+        };
+        let query = format!("SELECT TOP 0 {} FROM {}", select_list, table);
 
         let req = BatchRequest::new(query, self.connection.context().transaction_descriptor());
 
@@ -313,7 +411,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
 
         let token_stream = TokenStream::new(&mut self.connection).try_unfold();
 
-        let columns = token_stream
+        let described = token_stream
             .try_fold(None, |mut columns, token| async move {
                 if let ReceivedToken::NewResultset(metadata) = token {
                     columns = Some(metadata.columns.clone());
@@ -323,18 +421,42 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
             })
             .await?;
 
+        let described = described.ok_or_else(|| {
+            crate::Error::Protocol("expecting column metadata from query but not found".into())
+        })?;
+
         // now start bulk upload
-        let columns: Vec<_> = columns
-            .ok_or_else(|| {
-                crate::Error::Protocol("expecting column metadata from query but not found".into())
-            })?
+        let (loadable, not_updateable): (Vec<_>, Vec<_>) = described
             .into_iter()
-            .filter(|column| column.base.flags.contains(ColumnFlag::Updateable))
-            .collect();
+            .partition(|column| column.base.flags.contains(ColumnFlag::Updateable));
+
+        // With an explicit column list every named column must be loadable.
+        // With `*` the ones the server will not take are dropped silently,
+        // as `bulk_insert` always did.
+        if !columns.is_empty() && !not_updateable.is_empty() {
+            let names: Vec<String> = not_updateable
+                .iter()
+                .map(|column| column.col_name.to_string())
+                .collect();
+
+            return Err(crate::Error::BulkInput(
+                format!(
+                    "columns {:?} cannot be bulk loaded (the server reports them as not \
+                     updateable: identity, computed or read-only); leave them out of the \
+                     column list and the server fills them",
+                    names
+                )
+                .into(),
+            ));
+        }
 
         self.connection.flush_stream().await?;
-        let col_data = columns.iter().map(|c| format!("{}", c)).join(", ");
-        let query = format!("INSERT BULK {} ({})", table, col_data);
+        let col_data = loadable.iter().map(|c| format!("{}", c)).join(", ");
+        let mut query = format!("INSERT BULK {} ({})", table, col_data);
+
+        if options.table_lock {
+            query.push_str(" WITH (TABLOCK)");
+        }
 
         let req = BatchRequest::new(query, self.connection.context().transaction_descriptor());
         let id = self.connection.context_mut().next_packet_id();
@@ -344,7 +466,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
         let ts = TokenStream::new(&mut self.connection);
         ts.flush_done().await?;
 
-        BulkLoadRequest::new(&mut self.connection, columns)
+        BulkLoadRequest::new(&mut self.connection, loadable)
     }
 
     /// The TDS packet size this session is running with, in bytes.
