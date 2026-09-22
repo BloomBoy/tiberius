@@ -70,11 +70,17 @@ impl Encode<BytesMut> for VarLenContext {
 
         // length
         match self.r#type {
+            // MS-TDS 2.2.5.5.1.1: DATE_TYPE_INFO is the type byte alone — a
+            // `date` has no length or scale byte, and a server that gets one
+            // in a bulk load's COLMETADATA reads the next column's bytes off
+            // by one ("premature end-of-message"). The decoder below reads
+            // none and calls the length 3, so `len` is not written here.
             #[cfg(feature = "tds73")]
-            VarLenType::Daten
-            | VarLenType::Timen
-            | VarLenType::DatetimeOffsetn
-            | VarLenType::Datetime2 => {
+            VarLenType::Daten => (),
+            // TIME_TYPE_INFO, DATETIME2_TYPE_INFO, DATETIMEOFFSET_TYPE_INFO:
+            // the type byte and one SCALE byte, which `len` holds.
+            #[cfg(feature = "tds73")]
+            VarLenType::Timen | VarLenType::DatetimeOffsetn | VarLenType::Datetime2 => {
                 dst.put_u8(self.len() as u8);
             }
             VarLenType::Bitn
@@ -380,6 +386,14 @@ mod tests {
                 40,
                 Some(Collation::new(13632521, 52)),
             )),
+            #[cfg(feature = "tds73")]
+            TypeInfo::VarLenSized(VarLenContext::new(VarLenType::Daten, 3, None)),
+            #[cfg(feature = "tds73")]
+            TypeInfo::VarLenSized(VarLenContext::new(VarLenType::Timen, 3, None)),
+            #[cfg(feature = "tds73")]
+            TypeInfo::VarLenSized(VarLenContext::new(VarLenType::Datetime2, 7, None)),
+            #[cfg(feature = "tds73")]
+            TypeInfo::VarLenSized(VarLenContext::new(VarLenType::DatetimeOffsetn, 0, None)),
         ];
 
         for ti in types {
@@ -395,5 +409,29 @@ mod tests {
 
             assert_eq!(nti, ti)
         }
+    }
+
+    /// The bytes on the wire, not only the round trip: a `date` is one byte,
+    /// the temporal types with a scale are two.
+    #[cfg(feature = "tds73")]
+    #[test]
+    fn date_has_no_length_byte_and_the_scaled_types_have_one() {
+        let mut buf = BytesMut::new();
+        TypeInfo::VarLenSized(VarLenContext::new(VarLenType::Daten, 3, None))
+            .encode(&mut buf)
+            .expect("encode");
+        assert_eq!(&buf[..], &[VarLenType::Daten as u8]);
+
+        let mut buf = BytesMut::new();
+        TypeInfo::VarLenSized(VarLenContext::new(VarLenType::Timen, 3, None))
+            .encode(&mut buf)
+            .expect("encode");
+        assert_eq!(&buf[..], &[VarLenType::Timen as u8, 3]);
+
+        let mut buf = BytesMut::new();
+        TypeInfo::VarLenSized(VarLenContext::new(VarLenType::DatetimeOffsetn, 7, None))
+            .encode(&mut buf)
+            .expect("encode");
+        assert_eq!(&buf[..], &[VarLenType::DatetimeOffsetn as u8, 7]);
     }
 }
