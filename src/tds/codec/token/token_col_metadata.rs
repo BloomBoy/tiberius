@@ -12,6 +12,10 @@ use asynchronous_codec::BytesMut;
 use bytes::BufMut;
 use enumflags2::{bitflags, BitFlags};
 
+/// The length a `(max)` column carries in its TYPE_INFO (MS-TDS
+/// 2.2.5.4.3, "USHORTMAXLEN"): `0xFFFF`, not a size.
+const MAX_LENGTH_MARKER: usize = 0xFFFF;
+
 #[derive(Debug, Clone)]
 pub struct TokenColMetaData<'a> {
     pub columns: Vec<MetaDataColumn<'a>>,
@@ -23,9 +27,19 @@ pub struct MetaDataColumn<'a> {
     pub col_name: Cow<'a, str>,
 }
 
+/// The `INSERT BULK` spelling of a column: its name, bracket-quoted, and
+/// its type as the server must read it back — the same type the load's
+/// COLMETADATA carries, or the server refuses the load ("Invalid column
+/// type/attribute from bcp client").
+///
+/// Lengths: `char`/`varchar`/`binary`/`varbinary` are declared in bytes,
+/// which is what `len` holds. `nchar`/`nvarchar` are declared in
+/// CHARACTERS while `len` holds bytes, so it is halved; `(max)` is the
+/// `0xFFFF` marker alone. `time`, `datetime2` and `datetimeoffset` carry
+/// their scale, which `len` holds for those types.
 impl<'a> Display for MetaDataColumn<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} ", self.col_name)?;
+        write!(f, "[{}] ", self.col_name.replace(']', "]]"))?;
 
         match &self.base.ty {
             TypeInfo::FixedLen(fixed) => match fixed {
@@ -48,12 +62,12 @@ impl<'a> Display for MetaDataColumn<'a> {
                 #[cfg(feature = "tds73")]
                 VarLenType::Daten => write!(f, "date")?,
                 #[cfg(feature = "tds73")]
-                VarLenType::Timen => write!(f, "time")?,
+                VarLenType::Timen => write!(f, "time({})", ctx.len())?,
                 #[cfg(feature = "tds73")]
                 VarLenType::Datetime2 => write!(f, "datetime2({})", ctx.len())?,
                 VarLenType::Datetimen => write!(f, "datetime")?,
                 #[cfg(feature = "tds73")]
-                VarLenType::DatetimeOffsetn => write!(f, "datetimeoffset")?,
+                VarLenType::DatetimeOffsetn => write!(f, "datetimeoffset({})", ctx.len())?,
                 VarLenType::BigVarBin => {
                     if ctx.len() <= 8000 {
                         write!(f, "varbinary({})", ctx.len())?
@@ -71,13 +85,13 @@ impl<'a> Display for MetaDataColumn<'a> {
                 VarLenType::BigBinary => write!(f, "binary({})", ctx.len())?,
                 VarLenType::BigChar => write!(f, "char({})", ctx.len())?,
                 VarLenType::NVarchar => {
-                    if ctx.len() <= 4000 {
-                        write!(f, "nvarchar({})", ctx.len())?
-                    } else {
+                    if ctx.len() == MAX_LENGTH_MARKER {
                         write!(f, "nvarchar(max)")?
+                    } else {
+                        write!(f, "nvarchar({})", ctx.len() / 2)?
                     }
                 }
-                VarLenType::NChar => write!(f, "nchar({})", ctx.len())?,
+                VarLenType::NChar => write!(f, "nchar({})", ctx.len() / 2)?,
                 VarLenType::Text => write!(f, "text")?,
                 VarLenType::Image => write!(f, "image")?,
                 VarLenType::NText => write!(f, "ntext")?,
@@ -345,5 +359,65 @@ impl BaseMetaDataColumn {
         };
 
         Ok(BaseMetaDataColumn { flags, ty })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tds::codec::VarLenContext;
+
+    fn column(name: &str, ty: TypeInfo) -> MetaDataColumn<'static> {
+        MetaDataColumn {
+            base: BaseMetaDataColumn {
+                flags: BitFlags::empty(),
+                ty,
+            },
+            col_name: Cow::Owned(name.to_string()),
+        }
+    }
+
+    fn sized(ty: VarLenType, len: usize) -> TypeInfo {
+        TypeInfo::VarLenSized(VarLenContext::new(ty, len, None))
+    }
+
+    #[test]
+    fn the_name_is_bracket_quoted() {
+        assert_eq!(
+            column("Order Date", TypeInfo::FixedLen(FixedLenType::Int4)).to_string(),
+            "[Order Date] int"
+        );
+        assert_eq!(
+            column("a]b", TypeInfo::FixedLen(FixedLenType::Int8)).to_string(),
+            "[a]]b] bigint"
+        );
+    }
+
+    #[test]
+    fn unicode_columns_are_spelled_in_characters_and_max_only_for_the_marker() {
+        assert_eq!(column("s", sized(VarLenType::NVarchar, 600)).to_string(), "[s] nvarchar(300)");
+        assert_eq!(column("s", sized(VarLenType::NVarchar, 8000)).to_string(), "[s] nvarchar(4000)");
+        assert_eq!(column("s", sized(VarLenType::NVarchar, 0xFFFF)).to_string(), "[s] nvarchar(max)");
+        assert_eq!(column("s", sized(VarLenType::NChar, 10)).to_string(), "[s] nchar(5)");
+        // Byte-sized types keep their byte length.
+        assert_eq!(column("s", sized(VarLenType::BigVarChar, 8000)).to_string(), "[s] varchar(8000)");
+        assert_eq!(column("s", sized(VarLenType::BigVarChar, 0xFFFF)).to_string(), "[s] varchar(max)");
+        assert_eq!(column("s", sized(VarLenType::BigChar, 5)).to_string(), "[s] char(5)");
+        assert_eq!(column("b", sized(VarLenType::BigVarBin, 100)).to_string(), "[b] varbinary(100)");
+        assert_eq!(column("b", sized(VarLenType::BigVarBin, 0xFFFF)).to_string(), "[b] varbinary(max)");
+        assert_eq!(column("b", sized(VarLenType::BigBinary, 4)).to_string(), "[b] binary(4)");
+    }
+
+    #[cfg(feature = "tds73")]
+    #[test]
+    fn temporal_columns_carry_their_scale() {
+        assert_eq!(column("t", sized(VarLenType::Timen, 0)).to_string(), "[t] time(0)");
+        assert_eq!(column("t", sized(VarLenType::Timen, 3)).to_string(), "[t] time(3)");
+        assert_eq!(column("t", sized(VarLenType::Datetime2, 7)).to_string(), "[t] datetime2(7)");
+        assert_eq!(
+            column("t", sized(VarLenType::DatetimeOffsetn, 3)).to_string(),
+            "[t] datetimeoffset(3)"
+        );
+        assert_eq!(column("d", sized(VarLenType::Daten, 3)).to_string(), "[d] date");
     }
 }
