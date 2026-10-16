@@ -253,8 +253,18 @@ impl Default for Config {
             hostname_in_certificate: None,
             client_name: None,
             multi_subnet_failover: false,
-            handshake_timeout: Some(DEFAULT_HANDSHAKE_TIMEOUT),
-            command_timeout: Some(DEFAULT_COMMAND_TIMEOUT),
+            // toadsworth-compat keeps the 0.12.2 fork's contract: no driver
+            // deadlines, so the application's own limits are the only bounds.
+            handshake_timeout: if cfg!(feature = "toadsworth-compat") {
+                None
+            } else {
+                Some(DEFAULT_HANDSHAKE_TIMEOUT)
+            },
+            command_timeout: if cfg!(feature = "toadsworth-compat") {
+                None
+            } else {
+                Some(DEFAULT_COMMAND_TIMEOUT)
+            },
             lossy_utf16_decoding: false,
             #[cfg(any(
                 feature = "rustls",
@@ -572,7 +582,8 @@ impl Config {
     /// Enable `tracing` at the `DEBUG` level to see which handshake stage was
     /// reached, which pinpoints where a stall occurred.
     ///
-    /// - Defaults to 15 seconds, matching ADO.NET's `Connect Timeout`. Pass
+    /// - Defaults to 15 seconds, matching ADO.NET's `Connect Timeout` (none with
+    ///   `toadsworth-compat`). Pass
     ///   `None` to wait indefinitely. A zero duration is a degenerate bound
     ///   that fails as soon as the handshake would block.
     ///
@@ -622,7 +633,8 @@ impl Config {
     /// out of sync with the server; drop the [`Client`] and open a new one (a
     /// pool should discard the connection) rather than reuse it.
     ///
-    /// - Defaults to 30 seconds, matching ADO.NET's `Command Timeout`. Pass
+    /// - Defaults to 30 seconds, matching ADO.NET's `Command Timeout` (none with
+    ///   `toadsworth-compat`). Pass
     ///   `None` to wait indefinitely. A zero duration is a degenerate bound
     ///   that trips on the first server round-trip that is not answered
     ///   immediately.
@@ -1150,7 +1162,7 @@ impl ConfigBuilder {
     /// See [`Config::handshake_timeout`] for details. Pass `None` to wait
     /// indefinitely.
     ///
-    /// - Defaults to 15 seconds.
+    /// - Defaults to 15 seconds (none with `toadsworth-compat`).
     pub fn handshake_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.inner.handshake_timeout = timeout;
         self
@@ -1161,7 +1173,7 @@ impl ConfigBuilder {
     /// See [`Config::command_timeout`] for the exact (per-round-trip)
     /// semantics. Pass `None` to wait indefinitely.
     ///
-    /// - Defaults to 30 seconds.
+    /// - Defaults to 30 seconds (none with `toadsworth-compat`).
     pub fn command_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.inner.command_timeout = timeout;
         self

@@ -26,6 +26,13 @@ runs on the same paths; certificate refusals retain the application's
 classifier names and exact I/O prefix. Explicit trust settings are unchanged.
 The dependency floor is rustls 0.23.46. No audit exception is added.
 
+`toadsworth-compat` also keeps the shipped deadlines: 0.13 adds a 15-second
+handshake timeout and a 30-second command timeout by default, which the
+0.12.2 fork did not have. Under the feature both default to `None`, so a slow
+first response still waits on a usable session and the application's own
+30-second connect limit, with its message, remains the only login bound.
+Explicit `handshake_timeout`/`command_timeout` settings still apply.
+
 Run tests through the Toadsworth client repository and its pinned git
 revision. Do not invoke cb from this fork: cb supports only the client and
 control-plane repositories. Live SQL Server tests and their isolated
