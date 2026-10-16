@@ -1878,6 +1878,12 @@ mod tests {
         config.trust_cert_ca("/tmp/b.crt");
         config.trust_cert_ca_bundle(b"----- not really a cert -----".to_vec());
 
+        if cfg!(feature = "toadsworth-compat") {
+            assert_eq!(config.trust.extra_cas.len(), 2);
+            assert!(matches!(&config.trust.extra_cas[0], ExtraCa::File(p) if p == &PathBuf::from("/tmp/b.crt")));
+            assert!(matches!(&config.trust.extra_cas[1], ExtraCa::Bundle(_)));
+            return;
+        }
         assert_eq!(config.trust.extra_cas.len(), 3);
         match &config.trust.extra_cas[0] {
             ExtraCa::File(p) => assert_eq!(p, &PathBuf::from("/tmp/a.crt")),

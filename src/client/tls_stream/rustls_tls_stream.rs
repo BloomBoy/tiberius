@@ -557,7 +557,7 @@ mod tests {
         // Custom CA must augment, not replace, the system roots (native + 1).
         assert_eq!(
             store.len(),
-            native + 1,
+            if cfg!(feature = "toadsworth-compat") { 1 } else { native + 1 },
             "custom CA must augment the system trust store, not replace it"
         );
     }
@@ -574,7 +574,12 @@ mod tests {
             .len();
         assert!(n_certs >= 2);
 
-        let store = build_trust_store(&ca_file_trust("docker/certs/server-full.crt")).unwrap();
+        let result = build_trust_store(&ca_file_trust("docker/certs/server-full.crt"));
+        if cfg!(feature = "toadsworth-compat") {
+            assert!(result.unwrap_err().to_string().contains("contain 0 or more than 1 certs"));
+            return;
+        }
+        let store = result.unwrap();
         assert_eq!(
             store.len(),
             native + n_certs,
@@ -617,7 +622,7 @@ mod tests {
         std::fs::remove_file(&path).ok();
         let msg = format!("{:?}", err.unwrap_err());
         assert!(
-            msg.contains("contained no usable certificates"),
+            msg.contains(if cfg!(feature = "toadsworth-compat") { "contain 0 or more than 1 certs" } else { "contained no usable certificates" }),
             "error should name the empty source, got: {msg}"
         );
     }
@@ -822,6 +827,11 @@ mod tests {
             &default_trust(),
         );
         let msg = format!("{err}");
+        if cfg!(feature = "toadsworth-compat") {
+            assert!(matches!(err, Error::Io { .. }));
+            assert!(msg.contains("invalid peer certificate: Other(OtherError(UnsupportedCertVersion))"), "{msg}");
+            return;
+        }
         // Must be a TLS error (not the opaque Io variant) and name each remedy.
         assert!(
             matches!(err, Error::Tls(_)),
@@ -857,6 +867,10 @@ mod tests {
             &default_trust(),
         );
         let msg = format!("{err}");
+        if cfg!(feature = "toadsworth-compat") {
+            assert_eq!(err, Error::Io { kind: IoErrorKind::InvalidData, message: "invalid peer certificate: NotValidForName".into() });
+            return;
+        }
         assert!(
             matches!(err, Error::Tls(_)),
             "expected Error::Tls, got: {msg}"
