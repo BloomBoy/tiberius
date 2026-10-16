@@ -1500,3 +1500,7 @@ mod tests {
         assert_eq!(BitFlags::bits(all).count_ones(), 12);
     }
 }
+
+#[cfg(test)]
+#[path = "toad90_tests.rs"]
+mod toad90_tests;
