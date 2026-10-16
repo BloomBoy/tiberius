@@ -47,3 +47,35 @@ fn toad90_config_uses_only_the_last_named_ca() {
     config.trust_cert_ca("docker/certs/customCA.crt");
     assert_eq!(build_trust_store(&config.trust).unwrap().len(), 1);
 }
+
+// rustls 0.21 named an unsupported or mismatched signature algorithm
+// BadSignature and a missing serverAuth EKU Other(RequiredEkuNotFound); 0.23
+// reports context variants instead (TOAD-90, Fable P2).
+#[test]
+#[allow(deprecated)]
+fn toad90_signature_and_purpose_errors_keep_the_shipped_names() {
+    use tokio_rustls::rustls::ExtendedKeyPurpose;
+    let cases = [
+        (CertificateError::UnsupportedSignatureAlgorithm, "BadSignature"),
+        (CertificateError::UnsupportedSignatureAlgorithmContext {
+            signature_algorithm_id: vec![6, 9, 42, 134, 72, 134, 247, 13, 1, 1, 5],
+            supported_algorithms: Vec::new(),
+        }, "BadSignature"),
+        (CertificateError::UnsupportedSignatureAlgorithmForPublicKeyContext {
+            signature_algorithm_id: vec![6, 8, 42],
+            public_key_algorithm_id: vec![6, 7, 42],
+        }, "BadSignature"),
+        (CertificateError::InvalidPurpose, "Other(RequiredEkuNotFound)"),
+        (CertificateError::InvalidPurposeContext {
+            required: ExtendedKeyPurpose::ServerAuth,
+            presented: vec![ExtendedKeyPurpose::ClientAuth],
+        }, "Other(RequiredEkuNotFound)"),
+    ];
+    for (cert, word) in cases {
+        let error = handshake_error(io::Error::new(IoErrorKind::InvalidData, RustlsError::InvalidCertificate(cert)));
+        assert_eq!(error, Error::Io {
+            kind: IoErrorKind::InvalidData,
+            message: format!("invalid peer certificate: {word}"),
+        });
+    }
+}
