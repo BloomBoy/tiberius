@@ -1561,6 +1561,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "toadsworth-compat"))]
     fn handshake_timeout_defaults_to_fifteen_seconds() {
         // A sensible, ADO.NET-matching default so a stalled handshake surfaces
         // an error instead of hanging forever.
@@ -1599,6 +1600,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "toadsworth-compat"))]
     fn config_builder_defaults_handshake_timeout() {
         // The builder starts from `Config::default()`, so it inherits the bound.
         let config = Config::builder().build();
@@ -1609,11 +1611,24 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "toadsworth-compat"))]
     fn command_timeout_defaults_to_thirty_seconds() {
         // ADO.NET-matching default so a mid-result server stall surfaces an
         // error instead of hanging forever.
         let config = Config::new();
         assert_eq!(config.get_command_timeout(), Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    #[cfg(feature = "toadsworth-compat")]
+    fn toadsworth_compat_keeps_the_shipped_unbounded_deadlines() {
+        // The 0.12.2 fork had neither deadline: a slow first response waited
+        // and the session stayed usable, and the application's own connect
+        // limit was the only login bound (TOAD-90, Astra P1/P2).
+        for config in [Config::new(), Config::builder().build()] {
+            assert_eq!(config.get_handshake_timeout(), None);
+            assert_eq!(config.get_command_timeout(), None);
+        }
     }
 
     #[test]
@@ -1642,6 +1657,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "toadsworth-compat"))]
     fn config_builder_defaults_command_timeout() {
         let config = Config::builder().build();
         assert_eq!(config.get_command_timeout(), Some(Duration::from_secs(30)));
