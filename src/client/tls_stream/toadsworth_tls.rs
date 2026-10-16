@@ -38,8 +38,20 @@ pub(super) fn handshake_error(err: io::Error) -> Error {
     {
         // rustls 0.23 adds context to these variants. Keep the established
         // classifier names so the application presents the same guidance.
+        #[allow(deprecated)]
         let word = match cert {
             CertificateError::NotValidForNameContext { .. } => "NotValidForName".into(),
+            // rustls 0.21 mapped every unsupported or mismatched signature
+            // algorithm to BadSignature, and a missing serverAuth EKU fell
+            // through to webpki's RequiredEkuNotFound.
+            CertificateError::UnsupportedSignatureAlgorithm
+            | CertificateError::UnsupportedSignatureAlgorithmContext { .. }
+            | CertificateError::UnsupportedSignatureAlgorithmForPublicKeyContext { .. } => {
+                "BadSignature".into()
+            }
+            CertificateError::InvalidPurpose | CertificateError::InvalidPurposeContext { .. } => {
+                "Other(RequiredEkuNotFound)".into()
+            }
             CertificateError::ExpiredContext { .. } => "Expired".into(),
             CertificateError::NotValidYetContext { .. } => "NotValidYet".into(),
             CertificateError::Other(other) => format!("Other({:?})", other.0),

@@ -23,7 +23,10 @@ the old TLS dependency is deliberately replaced.
 certificate without adding system roots, and preserves CA loading errors.
 With no named CA, system roots still apply. Certificate validation still
 runs on the same paths; certificate refusals retain the application's
-classifier names and exact I/O prefix. Explicit trust settings are unchanged.
+classifier names and exact I/O prefix. This includes rustls 0.21's BadSignature for
+unsupported or mismatched signature algorithms (e.g. a SHA-1 signed server
+certificate) and Other(RequiredEkuNotFound) for a certificate without the
+serverAuth EKU. Explicit trust settings are unchanged.
 The dependency floor is rustls 0.23.46. No audit exception is added.
 
 `toadsworth-compat` also keeps the shipped deadlines: 0.13 adds a 15-second
