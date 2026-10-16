@@ -79,3 +79,38 @@ fn toad90_signature_and_purpose_errors_keep_the_shipped_names() {
         });
     }
 }
+
+// The same two refusals as produced by rustls' own verifier for real
+// certificates, not constructed error values: a SHA-1 signed server
+// certificate and one whose only EKU is clientAuth (docker/certs/toad90, valid
+// 2026-10-16 to 2046; verified at 2027-01-15).
+#[test]
+fn toad90_real_verifier_refusals_keep_the_shipped_names() {
+    use tokio_rustls::rustls::client::danger::ServerCertVerifier;
+    use tokio_rustls::rustls::crypto::aws_lc_rs;
+    use tokio_rustls::rustls::client::WebPkiServerVerifier;
+    use tokio_rustls::rustls::pki_types::{ServerName, UnixTime};
+    let first = |path: &str| CertificateDer::pem_slice_iter(&fs::read(path).unwrap()).next().unwrap().unwrap();
+    let mut roots = RootCertStore::empty();
+    roots.add(first("docker/certs/toad90/ca.pem")).unwrap();
+    let verifier = WebPkiServerVerifier::builder_with_provider(
+        std::sync::Arc::new(roots),
+        std::sync::Arc::new(aws_lc_rs::default_provider()),
+    )
+    .build()
+    .unwrap();
+    let at = UnixTime::since_unix_epoch(std::time::Duration::from_secs(1_800_000_000));
+    for (leaf, word) in [
+        ("docker/certs/toad90/server-sha1.pem", "BadSignature"),
+        ("docker/certs/toad90/server-client-eku.pem", "Other(RequiredEkuNotFound)"),
+    ] {
+        let refused = verifier
+            .verify_server_cert(&first(leaf), &[], &ServerName::try_from("localhost").unwrap(), &[], at)
+            .expect_err(leaf);
+        let error = handshake_error(io::Error::new(IoErrorKind::InvalidData, refused));
+        assert_eq!(error, Error::Io {
+            kind: IoErrorKind::InvalidData,
+            message: format!("invalid peer certificate: {word}"),
+        }, "{leaf}");
+    }
+}
