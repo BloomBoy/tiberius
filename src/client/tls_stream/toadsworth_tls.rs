@@ -42,6 +42,7 @@ pub(super) fn handshake_error(err: io::Error) -> Error {
             CertificateError::NotValidForNameContext { .. } => "NotValidForName".into(),
             CertificateError::ExpiredContext { .. } => "Expired".into(),
             CertificateError::NotValidYetContext { .. } => "NotValidYet".into(),
+            CertificateError::Other(other) => format!("Other({:?})", other.0),
             other => format!("{other:?}"),
         };
         return Error::Io {

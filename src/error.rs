@@ -8,7 +8,8 @@ use thiserror::Error;
 /// the lifecycle of this driver
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum Error {
-    #[error("An error occurred during the attempt of performing I/O: {}", message)]
+    #[cfg_attr(feature = "toadsworth-compat", error("An error occured during the attempt of performing I/O: {}", message))]
+    #[cfg_attr(not(feature = "toadsworth-compat"), error("An error occurred during the attempt of performing I/O: {}", message))]
     /// An error occurred when performing I/O to the server.
     Io {
         /// A list specifying general categories of I/O error.

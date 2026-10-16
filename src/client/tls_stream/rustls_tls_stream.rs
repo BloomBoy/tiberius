@@ -829,7 +829,7 @@ mod tests {
         let msg = format!("{err}");
         if cfg!(feature = "toadsworth-compat") {
             assert!(matches!(err, Error::Io { .. }));
-            assert!(msg.contains("invalid peer certificate: Other(OtherError(UnsupportedCertVersion))"), "{msg}");
+            assert!(msg.contains("invalid peer certificate: Other(UnsupportedCertVersion)"), "{msg}");
             return;
         }
         // Must be a TLS error (not the opaque Io variant) and name each remedy.

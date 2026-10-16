@@ -30,3 +30,20 @@ fn toad90_non_certificate_errors_keep_their_text() {
         kind: IoErrorKind::ConnectionReset, message: "reset by peer".into(),
     });
 }
+
+#[cfg(feature = "toadsworth-compat")]
+#[test]
+fn toad90_connect_error_preserves_the_exact_io_prefix() {
+    let error = handshake_error(io::Error::new(IoErrorKind::InvalidData,
+        RustlsError::InvalidCertificate(CertificateError::UnknownIssuer)));
+    assert_eq!(error.to_string(), "An error occured during the attempt of performing I/O: invalid peer certificate: UnknownIssuer");
+}
+
+#[cfg(feature = "toadsworth-compat")]
+#[test]
+fn toad90_config_uses_only_the_last_named_ca() {
+    let mut config = Config::new();
+    config.trust_cert_ca("no-such-ca.pem");
+    config.trust_cert_ca("docker/certs/customCA.crt");
+    assert_eq!(build_trust_store(&config.trust).unwrap().len(), 1);
+}
