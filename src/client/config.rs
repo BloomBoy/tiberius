@@ -427,7 +427,12 @@ impl Config {
     /// [`trust_cert_ca_bundle`]: Self::trust_cert_ca_bundle
     ///
     /// - Defaults to validating the server certificate is validated against system's certificate storage.
+    /// With `toadsworth-compat`, this replaces the previous CA and trusts only
+    /// that file, containing exactly one certificate, as in the shipped fork.
     pub fn trust_cert_ca(&mut self, path: impl ToString) {
+        if cfg!(feature = "toadsworth-compat") {
+            self.trust.extra_cas.clear();
+        }
         if self.trust.bypass {
             panic!("'trust_cert' and 'trust_cert_ca' are mutual exclusive! Only use one.")
         }

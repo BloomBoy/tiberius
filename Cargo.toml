@@ -140,6 +140,12 @@ optional = true
 version = "0.26.4"
 optional = true
 
+# Minimum fixed TLS release for RUSTSEC-2026-0346/0349.
+[dependencies.rustls]
+version = "0.23.46"
+optional = true
+default-features = false
+
 [dependencies.rustls-native-certs]
 version = "0.8"
 optional = true
@@ -225,6 +231,8 @@ rustdoc-args = ["--cfg", "docsrs"]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(docsrs)'] }
 
 [features]
+# Preserve the Toadsworth 0.12 CA-file and certificate-error contract.
+toadsworth-compat = []
 all = [
     "chrono",
     "time",
@@ -248,7 +256,7 @@ sql-browser-tokio = ["tokio", "tokio-util"]
 sql-browser-smol = ["async-io", "async-net", "futures-lite"]
 integrated-auth-gssapi = ["libgssapi"]
 bigdecimal = ["bigdecimal_"]
-rustls = ["tokio-rustls", "tokio-util", "rustls-native-certs", "rustls-webpki", "rustls-pki-types"]
+rustls = ["dep:rustls", "tokio-rustls", "tokio-util", "rustls-native-certs", "rustls-webpki", "rustls-pki-types"]
 # Bundle a compiled-in snapshot of Mozilla's root CA store, selectable via
 # `Config::trust_webpki_roots()` (rustls only). Implies `rustls`; the bundled
 # roots are a pinned snapshot that goes stale without dependency updates.

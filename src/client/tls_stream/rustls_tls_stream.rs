@@ -124,6 +124,9 @@ fn get_server_name(config: &Config) -> crate::Result<ServerName<'static>> {
 /// short-circuits certificate checks in [`NoCertVerifier`], so a cert error
 /// cannot originate there.
 fn map_handshake_error(err: io::Error, trust: &TrustConfig) -> crate::Error {
+    if cfg!(feature = "toadsworth-compat") {
+        return toadsworth_tls::handshake_error(err);
+    }
     // Only certificate-*validation* failures get the extra guidance. Under the
     // trust bypass the verifier never rejects a cert, so any error there is
     // genuinely transport-level and should pass through unchanged.
@@ -326,6 +329,11 @@ fn load_native_roots_into(roots: &mut RootCertStore) -> (usize, bool) {
 /// `trust_cert_ca` contract). Every extra source must yield at least one usable
 /// certificate (enforced in [`certs::trust_anchors`]).
 fn build_trust_store(trust: &TrustConfig) -> crate::Result<RootCertStore> {
+    if cfg!(feature = "toadsworth-compat") {
+        if let Some(crate::client::config::ExtraCa::File(path)) = trust.extra_cas.last() {
+            return toadsworth_tls::exclusive_ca(path);
+        }
+    }
     let mut store = RootCertStore::empty();
 
     // Base trust anchors from the configured source.
@@ -1005,3 +1013,6 @@ mod tests {
         assert!(schemes.contains(&SignatureScheme::ED25519));
     }
 }
+
+#[path = "toadsworth_tls.rs"]
+mod toadsworth_tls;

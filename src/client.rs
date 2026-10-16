@@ -555,12 +555,20 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
         // no `KEEP_IDENTITY` keyword in the `INSERT BULK` `WITH (...)` grammar.
         // So when the flag is set, identity columns are additionally retained.
         let keep_identity = options.contains(SqlBulkCopyOption::KeepIdentity);
-        let mut columns: Vec<_> = self
-            .column_metadata(table, columns)
+        let requested = if columns.is_empty() { &["*"][..] } else { columns };
+        let (mut columns, refused): (Vec<_>, Vec<_>) = self
+            .column_metadata(table, requested)
             .await?
             .into_iter()
-            .filter(|column| bulk_column_is_target(&column.base, keep_identity))
-            .collect();
+            .partition(|column| bulk_column_is_target(&column.base, keep_identity));
+        if requested != ["*"] && !refused.is_empty() {
+            let names: Vec<_> = refused.iter().map(|c| c.col_name.to_string()).collect();
+            return Err(crate::Error::BulkInput(format!(
+                "columns {:?} cannot be bulk loaded (the server reports them as not \
+                 updateable: identity, computed or read-only); leave them out of the \
+                 column list and the server fills them", names
+            ).into()));
+        }
 
         // `text`/`ntext`/`image` columns must carry the destination TableName in
         // the COLMETADATA we emit for the bulk load (MS-TDS §2.2.7.4). Record the
@@ -708,6 +716,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
     pub async fn cancel_query(&mut self) -> crate::Result<()> {
         self.connection.cancel_request().await?;
         Ok(())
+    }
+
+    /// The packet size granted by the server in its ENVCHANGE response.
+    pub fn packet_size(&self) -> u32 {
+        self.connection.context().packet_size()
     }
 
     /// Closes this database connection explicitly.
