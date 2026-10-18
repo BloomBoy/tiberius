@@ -40,3 +40,10 @@ Run tests through the Toadsworth client repository and its pinned git
 revision. Do not invoke cb from this fork: cb supports only the client and
 control-plane repositories. Live SQL Server tests and their isolated
 container runner are in the client repository under TOAD-90.
+
+`trust_cert_ca_pem` (Toadsworth) takes a named CA as PEM text, for
+connections whose CA arrives as text rather than a path (an organisation
+register entry). Under `toadsworth-compat` it follows `trust_cert_ca`: it
+replaces the previous CA and the system roots and must hold exactly one
+certificate. Unparseable text is refused as "Could not read provided CA
+certificate! The PEM text is not a valid certificate." and never echoed.

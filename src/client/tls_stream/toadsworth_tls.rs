@@ -32,6 +32,29 @@ pub(super) fn exclusive_ca(path: &Path) -> crate::Result<RootCertStore> {
     Ok(store)
 }
 
+/// A CA given as PEM text, under the same policy as [`exclusive_ca`]. The text
+/// may be key material pasted by mistake, so no error repeats any of it.
+pub(super) fn exclusive_ca_pem(pem: &[u8]) -> crate::Result<RootCertStore> {
+    let unreadable = || Error::Io {
+        kind: IoErrorKind::InvalidData,
+        message: "Could not read provided CA certificate! The PEM text is not a valid certificate.".into(),
+    };
+    let certs = CertificateDer::pem_slice_iter(pem)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| unreadable())?;
+    if certs.len() != 1 {
+        return Err(Error::Io {
+            kind: IoErrorKind::InvalidInput,
+            message: "Provided CA certificate PEM text contain 0 or more than 1 certs".into(),
+        });
+    }
+    let mut store = RootCertStore::empty();
+    store
+        .add(certs.into_iter().next().expect("exactly one certificate"))
+        .map_err(|_| unreadable())?;
+    Ok(store)
+}
+
 pub(super) fn handshake_error(err: io::Error) -> Error {
     if let Some(RustlsError::InvalidCertificate(cert)) =
         err.get_ref().and_then(|inner| inner.downcast_ref::<RustlsError>())

@@ -457,7 +457,22 @@ impl Config {
 
     /// Toadsworth: trust a CA given as PEM text, for connections whose CA
     /// arrives as text instead of a path (an organisation register entry).
+    ///
+    /// With `toadsworth-compat` it follows [`trust_cert_ca`]: it replaces the
+    /// previous CA and the system roots, and the text must hold exactly one
+    /// certificate. Without the feature it is layered on the base anchors like
+    /// [`trust_cert_ca_bundle`].
+    ///
+    /// # Panics
+    /// Will panic in case [`trust_cert`] was called before.
+    ///
+    /// [`trust_cert`]: Self::trust_cert
+    /// [`trust_cert_ca`]: Self::trust_cert_ca
+    /// [`trust_cert_ca_bundle`]: Self::trust_cert_ca_bundle
     pub fn trust_cert_ca_pem(&mut self, pem: impl Into<Vec<u8>>) {
+        if cfg!(feature = "toadsworth-compat") {
+            self.trust.extra_cas.clear();
+        }
         if self.trust.bypass {
             panic!("'trust_cert' and 'trust_cert_ca_pem' are mutual exclusive! Only use one.")
         }

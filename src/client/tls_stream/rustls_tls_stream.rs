@@ -330,8 +330,10 @@ fn load_native_roots_into(roots: &mut RootCertStore) -> (usize, bool) {
 /// certificate (enforced in [`certs::trust_anchors`]).
 fn build_trust_store(trust: &TrustConfig) -> crate::Result<RootCertStore> {
     if cfg!(feature = "toadsworth-compat") {
-        if let Some(crate::client::config::ExtraCa::File(path)) = trust.extra_cas.last() {
-            return toadsworth_tls::exclusive_ca(path);
+        match trust.extra_cas.last() {
+            Some(crate::client::config::ExtraCa::File(path)) => return toadsworth_tls::exclusive_ca(path),
+            Some(crate::client::config::ExtraCa::Pem(pem)) => return toadsworth_tls::exclusive_ca_pem(pem),
+            _ => {}
         }
     }
     let mut store = RootCertStore::empty();
