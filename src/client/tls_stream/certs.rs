@@ -35,7 +35,7 @@ use std::{fs, path::Path};
 pub(crate) fn trust_anchors(extra: &ExtraCa) -> crate::Result<Vec<CertificateDer<'static>>> {
     let certs = match extra {
         ExtraCa::File(path) => certs_from_file(path)?,
-        ExtraCa::Bundle(bytes) => certs_from_bundle(bytes)?,
+        ExtraCa::Bundle(bytes) | ExtraCa::Pem(bytes) => certs_from_bundle(bytes)?,
     };
 
     // Zero usable certificates is fatal and names the source — never a
@@ -60,6 +60,7 @@ pub(crate) fn source_name(extra: &ExtraCa) -> String {
     match extra {
         ExtraCa::File(path) => path.to_string_lossy().into_owned(),
         ExtraCa::Bundle(bytes) => format!("in-memory CA bundle ({} bytes)", bytes.len()),
+        ExtraCa::Pem(bytes) => format!("CA PEM text ({} bytes)", bytes.len()),
     }
 }
 

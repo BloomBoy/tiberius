@@ -165,6 +165,9 @@ pub(crate) enum ExtraCa {
     /// blocks parsed) when the bytes contain a `-----BEGIN` marker at the start
     /// of a line, otherwise treated as a single DER certificate.
     Bundle(Vec<u8>),
+    /// Toadsworth: one CA given as PEM text rather than a file, from
+    /// [`Config::trust_cert_ca_pem`].
+    Pem(Vec<u8>),
 }
 
 // Manual `Debug`: summarise `Bundle` as `Bundle { len: N }` so raw certificate
@@ -174,6 +177,7 @@ impl std::fmt::Debug for ExtraCa {
         match self {
             ExtraCa::File(path) => f.debug_tuple("File").field(path).finish(),
             ExtraCa::Bundle(bytes) => f.debug_struct("Bundle").field("len", &bytes.len()).finish(),
+            ExtraCa::Pem(bytes) => f.debug_struct("Pem").field("len", &bytes.len()).finish(),
         }
     }
 }
@@ -449,6 +453,15 @@ impl Config {
         self.trust
             .extra_cas
             .push(ExtraCa::File(PathBuf::from(path.to_string())));
+    }
+
+    /// Toadsworth: trust a CA given as PEM text, for connections whose CA
+    /// arrives as text instead of a path (an organisation register entry).
+    pub fn trust_cert_ca_pem(&mut self, pem: impl Into<Vec<u8>>) {
+        if self.trust.bypass {
+            panic!("'trust_cert' and 'trust_cert_ca_pem' are mutual exclusive! Only use one.")
+        }
+        self.trust.extra_cas.push(ExtraCa::Pem(pem.into()));
     }
 
     /// Trust additional CA certificates supplied as in-memory bytes, *in

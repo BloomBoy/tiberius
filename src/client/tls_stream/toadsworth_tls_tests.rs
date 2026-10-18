@@ -114,3 +114,63 @@ fn toad90_real_verifier_refusals_keep_the_shipped_names() {
         }, "{leaf}");
     }
 }
+
+// A CA can arrive as PEM text instead of a path (an organisation register
+// entry). It follows the shipped policy of a named CA file: it replaces the
+// system roots and any earlier CA, holds exactly one certificate, and is
+// never echoed in an error (TOAD-90, kort 71).
+#[cfg(feature = "toadsworth-compat")]
+const TOAD90_BROKEN_PEM: &str = "Could not read provided CA certificate! The PEM text is not a valid certificate.";
+
+#[cfg(feature = "toadsworth-compat")]
+#[test]
+fn toad90_pem_text_ca_has_no_system_roots() {
+    let mut config = Config::new();
+    config.trust_cert_ca_pem(fs::read("docker/certs/customCA.crt").unwrap());
+    assert_eq!(build_trust_store(&config.trust).unwrap().len(), 1);
+}
+
+#[cfg(feature = "toadsworth-compat")]
+#[test]
+fn toad90_pem_text_and_a_path_replace_each_other() {
+    let mut config = Config::new();
+    config.trust_cert_ca("no-such-ca.pem");
+    config.trust_cert_ca_pem(fs::read("docker/certs/customCA.crt").unwrap());
+    assert_eq!(build_trust_store(&config.trust).unwrap().len(), 1);
+    let mut config = Config::new();
+    config.trust_cert_ca_pem(b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n".to_vec());
+    config.trust_cert_ca("docker/certs/customCA.crt");
+    assert_eq!(build_trust_store(&config.trust).unwrap().len(), 1);
+}
+
+#[cfg(feature = "toadsworth-compat")]
+#[test]
+fn toad90_broken_pem_text_is_refused_without_echoing_it() {
+    for pem in [
+        "-----BEGIN CERTIFICATE-----\nnot*base64*secret\n-----END CERTIFICATE-----\n",
+        "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+        "-----BEGIN CERTIFICATE-----\nMIIB\n",
+    ] {
+        let mut config = Config::new();
+        config.trust_cert_ca_pem(pem.as_bytes().to_vec());
+        let error = build_trust_store(&config.trust).unwrap_err();
+        assert_eq!(error, Error::Io { kind: IoErrorKind::InvalidData, message: TOAD90_BROKEN_PEM.into() }, "{pem}");
+    }
+}
+
+#[cfg(feature = "toadsworth-compat")]
+#[test]
+fn toad90_pem_text_must_hold_exactly_one_certificate() {
+    for pem in [
+        fs::read("docker/certs/server-full.crt").unwrap(),
+        b"-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n".to_vec(),
+    ] {
+        let mut config = Config::new();
+        config.trust_cert_ca_pem(pem);
+        let error = build_trust_store(&config.trust).unwrap_err();
+        assert_eq!(error, Error::Io {
+            kind: IoErrorKind::InvalidInput,
+            message: "Provided CA certificate PEM text contain 0 or more than 1 certs".into(),
+        });
+    }
+}
