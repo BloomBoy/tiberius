@@ -1117,7 +1117,7 @@ mod tests {
         // somewhere inside its message. The state stays "position unknown"
         // (the safe side): the cancel claims no acknowledgement even though
         // the next bytes would read as DONE_ATTN.
-        let mut payload = vec![0xFFu8]; // no such token type: a decoding error
+        let mut payload = vec![0x01u8]; // no such token type (0xFF would be DONEINPROC): a decoding error
         payload.extend_from_slice(&done_token(DONE_ATTN, 0, 0));
         let mut conn = Connection::test_over(MockStream::new(packet_bytes_with(&payload, PacketStatus::NormalMessage)), false);
         {
