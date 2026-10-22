@@ -220,20 +220,27 @@ where
     /// the message ended without it: the server answers the interrupted
     /// request's response first and the acknowledgement may come in a message
     /// of its own, which the caller reads next ([`Connection::cancel_request`]).
+    ///
+    /// The acknowledgement is answered only once its message's end has been
+    /// CONSUMED (Astra K4-54/55 P2): the tokens after the DONE_ATTN are read
+    /// through to the end of the message, so the connection is at a real
+    /// message boundary — and reused — only after that, never with the rest
+    /// of the acknowledging message still on the wire.
     pub(crate) async fn flush_done_attention(self) -> crate::Result<Option<TokenDone>> {
         let mut stream = self.try_unfold();
+        let mut acknowledged = None;
 
         loop {
             match stream.try_next().await? {
                 Some(ReceivedToken::Done(token))
                 | Some(ReceivedToken::DoneProc(token))
                 | Some(ReceivedToken::DoneInProc(token))
-                    if token.is_attention() =>
+                    if token.is_attention() && acknowledged.is_none() =>
                 {
-                    return Ok(Some(token));
+                    acknowledged = Some(token);
                 }
                 Some(_) => (),
-                None => return Ok(None),
+                None => return Ok(acknowledged),
             }
         }
     }
@@ -1127,6 +1134,34 @@ mod tests {
         }
         let answer = tokio::time::timeout(std::time::Duration::from_millis(200), conn.cancel_request()).await;
         assert!(!matches!(answer, Ok(Ok(_))), "no acknowledgement after a decoding error: {answer:?}");
+    }
+
+    #[tokio::test]
+    async fn cancel_request_answers_ok_only_after_the_acknowledging_messages_end_is_consumed() {
+        // Astra K4-54/55 P2: the DONE_ATTN has arrived, but the rest of its
+        // message (its end-of-message packet) has not. The acknowledgement
+        // is not answered — the session is not handed back for reuse — until
+        // that end is consumed.
+        let ack_part = packet_bytes_with(&done_token(DONE_ATTN, 0, 0), PacketStatus::NormalMessage);
+        let end_part = packet_bytes_with(&done_token(0, 0, 0), PacketStatus::EndOfMessage);
+        let gate = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(ack_part.len()));
+        let mut wire = ack_part.clone();
+        wire.extend_from_slice(&end_part);
+        let mut conn = Connection::test_over(GatedStream { data: wire, pos: 0, open_to: gate.clone() }, false);
+        let early = tokio::time::timeout(std::time::Duration::from_millis(200), conn.cancel_request()).await;
+        assert!(early.is_err(), "no acknowledgement before its message's end is consumed: {early:?}");
+    }
+
+    #[tokio::test]
+    async fn cancel_request_reads_through_to_the_end_of_the_acknowledging_message() {
+        // [DONE+ATTN][DONE] in one message: Ok, and the connection is at the
+        // message's end — nothing of it is left for the next request.
+        let mut payload = done_token(DONE_ATTN, 0, 0);
+        payload.extend_from_slice(&done_token(0, 0, 0));
+        let mut conn = conn_over(&payload);
+        let done = conn.cancel_request().await.expect("acknowledged");
+        assert!(done.is_attention());
+        assert!(conn.is_eof(), "the acknowledging message was read to its end");
     }
 
     #[tokio::test]
