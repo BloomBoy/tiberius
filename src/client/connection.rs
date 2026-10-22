@@ -469,13 +469,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
             if let Some(done) = TokenStream::new(self).flush_done_attention().await? {
                 return Ok(done);
             }
-            if !self.flushed {
-                return Err(crate::Error::Protocol(
-                    "Never got a DONE token acknowledging the Attention signal.".into(),
-                ));
-            }
-            // The message ended without it: the next message is still the
-            // cancelled request's, so read it too.
+            // The message ended without it (`flush_done_attention` answers
+            // `None` only at `is_eof`, i.e. with `flushed` set): the next
+            // message is still the cancelled request's, so read it too. A
+            // connection that ends before the acknowledgement fails the next
+            // read, so this never answers Ok without DONE_ATTN.
             self.flushed = false;
         }
     }
