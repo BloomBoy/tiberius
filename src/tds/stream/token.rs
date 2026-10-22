@@ -474,6 +474,9 @@ where
             }
 
             let ty_byte = this.conn.read_u8().await?;
+            // From here until the token is whole, a dropped future leaves the
+            // connection inside a token (`Connection::inside_token`).
+            this.conn.set_inside_token(true);
 
             let ty = TokenType::try_from(ty_byte)
                 .map_err(|_| Error::Protocol(format!("invalid token type {:x}", ty_byte).into()))?;
@@ -506,6 +509,7 @@ where
                 // rather than silently falling through. Unknown token *bytes*
                 // are already rejected by the `TokenType::try_from` above.
             };
+            this.conn.set_inside_token(false);
 
             Ok(Some((token, this)))
         });
@@ -988,6 +992,96 @@ mod tests {
         let done = conn.cancel_request().await.expect("acknowledged in a message of its own");
         assert!(done.is_attention());
         assert!(conn.is_eof(), "the acknowledgement was consumed here, not by the next request");
+    }
+
+    // A mock that serves its script only up to a gate the test moves, and
+    // answers Pending beyond it — a server whose bytes are still in flight,
+    // so a read can be dropped in the middle of a token.
+    struct GatedStream {
+        data: Vec<u8>,
+        pos: usize,
+        open_to: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl AsyncRead for GatedStream {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _: &mut TaskContext<'_>,
+            buf: &mut [u8],
+        ) -> Poll<io::Result<usize>> {
+            let open_to = self.open_to.load(std::sync::atomic::Ordering::SeqCst).min(self.data.len());
+            if self.pos >= open_to {
+                // Nothing wakes this task again: the test drops the read and
+                // then polls a fresh future after moving the gate.
+                return Poll::Pending;
+            }
+            let n = (open_to - self.pos).min(buf.len());
+            let start = self.pos;
+            buf[..n].copy_from_slice(&self.data[start..start + n]);
+            self.pos += n;
+            Poll::Ready(Ok(n))
+        }
+    }
+
+    impl AsyncWrite for GatedStream {
+        fn poll_write(self: Pin<&mut Self>, _: &mut TaskContext<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+            Poll::Ready(Ok(buf.len()))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_close(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn packet_bytes_with(payload: &[u8], status: PacketStatus) -> Vec<u8> {
+        let mut header = PacketHeader::batch(1);
+        header.set_status(status);
+        let packet = Packet::new(header, BytesMut::from(payload));
+        let mut buf = BytesMut::new();
+        packet.encode(&mut buf).unwrap();
+        buf.to_vec()
+    }
+
+    #[tokio::test]
+    async fn cancel_request_after_a_read_dropped_inside_a_value_never_takes_its_bytes_for_the_acknowledgement() {
+        // Astra K4-52 P2: a stop lands while a token's value streams in. The
+        // first packet holds the start of a token (an ERROR token whose body
+        // promises 100 bytes, here only its first fields); the read is
+        // dropped there. The next packet carries the REST of that value, and
+        // it happens to begin `FD 20 00 …` — exactly a DONE with DONE_ATTN.
+        // The server's real acknowledgement is held back. Parsing from the
+        // dropped read's position would call the cancel acknowledged; it must
+        // never be Ok.
+        let mut head = vec![0xAAu8];
+        head.extend_from_slice(&100u16.to_le_bytes());
+        head.extend_from_slice(&50000u32.to_le_bytes()); // code
+        head.push(1); // state
+        head.push(16); // class — the message's length is still to come
+        let mut rest = done_token(DONE_ATTN, 0, 0); // value bytes that LOOK like the acknowledgement
+        rest.extend_from_slice(&[0u8; 20]);
+        let first = packet_bytes_with(&head, PacketStatus::NormalMessage);
+        let second = packet_bytes_with(&rest, PacketStatus::EndOfMessage);
+        let real_ack = packet_bytes(&done_token(DONE_ATTN, 0, 0));
+        let gate = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(first.len()));
+        let mut wire = first.clone();
+        wire.extend_from_slice(&second);
+        wire.extend_from_slice(&real_ack);
+        let mut conn = Connection::test_over(GatedStream { data: wire, pos: 0, open_to: gate.clone() }, false);
+        {
+            use futures_util::StreamExt as _;
+            let mut stream = TokenStream::new(&mut conn).try_unfold();
+            let mut cx = TaskContext::from_waker(std::task::Waker::noop());
+            assert!(stream.poll_next_unpin(&mut cx).is_pending(), "the read waits inside the ERROR token for its message");
+        } // the read is dropped here, inside the token
+        // The rest of the value arrives; the real acknowledgement is held back.
+        gate.store(first.len() + second.len(), std::sync::atomic::Ordering::SeqCst);
+        let answer = tokio::time::timeout(std::time::Duration::from_millis(200), conn.cancel_request()).await;
+        assert!(
+            !matches!(answer, Ok(Ok(_))),
+            "a value's FD 20 00 must never be taken for DONE_ATTN after a read dropped inside a token: {answer:?}"
+        );
     }
 
     #[tokio::test]

@@ -73,6 +73,14 @@ where
     /// the same connection fails cleanly instead of appending a second message
     /// after a half-sent one and silently desyncing the server.
     poisoned: bool,
+    /// Set while the token stream is inside a token: from its type byte until
+    /// the token is decoded whole. A read future dropped in the middle of a
+    /// token (a stop landing while a row's value streams in) leaves it set,
+    /// and the bytes still in `buf` are then the REST of a value — which may
+    /// well read as `FD 20 00 …`, a DONE with DONE_ATTN. `cancel_request`
+    /// refuses to parse an acknowledgement from such a position; `flush_stream`
+    /// clears it when it resynchronises on a packet boundary.
+    inside_token: bool,
     /// Set when a `command_timeout` fires mid-response. The tail of the
     /// timed-out response is then still unread on the wire, so the connection is
     /// out of sync with the server and must not be reused. This handle is shared
@@ -174,6 +182,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
             flushed: false,
             buf: BytesMut::new(),
             poisoned: false,
+            inside_token: false,
             command_desync: Arc::new(AtomicBool::new(false)),
         };
 
@@ -443,6 +452,19 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         // valid cancellation.
         self.ensure_not_poisoned()?;
 
+        // A read dropped inside a token leaves the rest of that token's bytes
+        // first in line: parsing an acknowledgement from there could take a
+        // value's `FD 20 00 …` for DONE_ATTN, call the cancel confirmed, keep
+        // the session and leave the real acknowledgement for the next
+        // request (TOAD-43, Astra K4-52 P2). The token boundary is not safe,
+        // so no acknowledgement is claimed: the caller closes the connection
+        // and the stop stays unconfirmed. Nothing is written.
+        if self.inside_token {
+            return Err(crate::Error::Protocol(
+                "an Attention after a read dropped inside a token cannot be acknowledged safely".into(),
+            ));
+        }
+
         let id = self.context.next_packet_id();
         let header = PacketHeader::attention(id);
 
@@ -497,6 +519,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         // if a previous result stream was dropped part-way through a value
         // (the lost bytes belonged to a packet we are discarding anyway).
         self.buf.truncate(0);
+        // Truncating on a packet boundary leaves no half-read token behind.
+        self.inside_token = false;
 
         if self.flushed {
             return Ok(());
@@ -526,6 +550,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         }
 
         Ok(())
+    }
+
+    /// The token stream read a token's type byte and has not finished that
+    /// token yet (see the `inside_token` field).
+    pub(crate) fn set_inside_token(&mut self, inside: bool) {
+        self.inside_token = inside;
     }
 
     /// True if the underlying stream has no more data and is consumed
@@ -914,6 +944,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
                     flushed: false,
                     buf: BytesMut::new(),
                     poisoned: false,
+                    inside_token: false,
                     command_desync,
                 })
             }
@@ -960,6 +991,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
             context: Context::new(),
             buf: BytesMut::new(),
             poisoned,
+            inside_token: false,
             command_desync: Arc::new(AtomicBool::new(false)),
         }
     }
