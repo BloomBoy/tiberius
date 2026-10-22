@@ -73,14 +73,18 @@ where
     /// the same connection fails cleanly instead of appending a second message
     /// after a half-sent one and silently desyncing the server.
     poisoned: bool,
-    /// Set while the token stream is inside a token: from its type byte until
-    /// the token is decoded whole. A read future dropped in the middle of a
-    /// token (a stop landing while a row's value streams in) leaves it set,
-    /// and the bytes still in `buf` are then the REST of a value — which may
-    /// well read as `FD 20 00 …`, a DONE with DONE_ATTN. `cancel_request`
-    /// refuses to parse an acknowledgement from such a position; `flush_stream`
-    /// clears it when it resynchronises on a packet boundary.
-    inside_token: bool,
+    /// The ONE state for "where in the response stream are we" (TOAD-43,
+    /// Astra K4-52 P2 and K4-53 P2). `true` from the moment any byte of a
+    /// response message is consumed — by a token read or by `flush_stream`'s
+    /// drain — until that message's end (its end-of-message packet) has
+    /// actually been consumed. A future dropped at any point in between,
+    /// of whatever kind, leaves it set: the next bytes in line may be the
+    /// middle of a value, and a value's `FD 20 00 …` reads as a DONE with
+    /// DONE_ATTN. `cancel_request` never claims an acknowledgement while it is
+    /// set. A request whose response has not been touched yet (a read dropped
+    /// while it still waits for the first byte) leaves it clear: the response
+    /// will start on a token boundary.
+    boundary_unknown: bool,
     /// Set when a `command_timeout` fires mid-response. The tail of the
     /// timed-out response is then still unread on the wire, so the connection is
     /// out of sync with the server and must not be reused. This handle is shared
@@ -182,7 +186,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
             flushed: false,
             buf: BytesMut::new(),
             poisoned: false,
-            inside_token: false,
+            boundary_unknown: false,
             command_desync: Arc::new(AtomicBool::new(false)),
         };
 
@@ -452,16 +456,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         // valid cancellation.
         self.ensure_not_poisoned()?;
 
-        // A read dropped inside a token leaves the rest of that token's bytes
-        // first in line: parsing an acknowledgement from there could take a
-        // value's `FD 20 00 …` for DONE_ATTN, call the cancel confirmed, keep
-        // the session and leave the real acknowledgement for the next
-        // request (TOAD-43, Astra K4-52 P2). The token boundary is not safe,
-        // so no acknowledgement is claimed: the caller closes the connection
-        // and the stop stays unconfirmed. Nothing is written.
-        if self.inside_token {
+        // A read or a flush dropped part-way through a response message leaves
+        // bytes of that message first in line: parsing an acknowledgement
+        // from there could take a value's `FD 20 00 …` for DONE_ATTN, call
+        // the cancel confirmed, keep the session and leave the real
+        // acknowledgement for the next request (TOAD-43, Astra K4-52 P2 and
+        // K4-53 P2). While the position is unknown no acknowledgement is
+        // claimed: the caller closes the connection and the stop stays
+        // unconfirmed. Nothing is written.
+        if self.boundary_unknown {
             return Err(crate::Error::Protocol(
-                "an Attention after a read dropped inside a token cannot be acknowledged safely".into(),
+                "an Attention while the response stream's position is unknown cannot be acknowledged safely".into(),
             ));
         }
 
@@ -519,12 +524,18 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         // if a previous result stream was dropped part-way through a value
         // (the lost bytes belonged to a packet we are discarding anyway).
         self.buf.truncate(0);
-        // Truncating on a packet boundary leaves no half-read token behind.
-        self.inside_token = false;
 
         if self.flushed {
+            // The message's end-of-message packet had arrived: discarding the
+            // rest of its bytes reaches its end.
+            self.boundary_unknown = false;
             return Ok(());
         }
+
+        // Draining: the position is unknown until the end-of-message packet
+        // is consumed. A drain dropped while it waits for the next packet
+        // leaves it so — that packet may continue a value (Astra K4-53 P2).
+        self.boundary_unknown = true;
 
         loop {
             match self.try_next().await {
@@ -535,6 +546,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
                     );
 
                     if packet.is_last() {
+                        self.boundary_unknown = false;
                         break;
                     }
                 }
@@ -552,11 +564,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         Ok(())
     }
 
-    /// The token stream read a token's type byte and has not finished that
-    /// token yet (see the `inside_token` field).
-    pub(crate) fn set_inside_token(&mut self, inside: bool) {
-        self.inside_token = inside;
-    }
 
     /// True if the underlying stream has no more data and is consumed
     /// completely.
@@ -944,7 +951,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
                     flushed: false,
                     buf: BytesMut::new(),
                     poisoned: false,
-                    inside_token: false,
+                    boundary_unknown: false,
                     command_desync,
                 })
             }
@@ -991,7 +998,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
             context: Context::new(),
             buf: BytesMut::new(),
             poisoned,
-            inside_token: false,
+            boundary_unknown: false,
             command_desync: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -1308,6 +1315,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> futures_util::io::AsyncRead for C
         }
 
         buf.copy_from_slice(this.buf.split_to(size).as_ref());
+        // Bytes of a response were consumed: the position is unknown until
+        // the message's last byte is consumed.
+        this.boundary_unknown = !(this.flushed && this.buf.is_empty());
         Poll::Ready(Ok(size))
     }
 }

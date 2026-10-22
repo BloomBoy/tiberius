@@ -474,9 +474,6 @@ where
             }
 
             let ty_byte = this.conn.read_u8().await?;
-            // From here until the token is whole, a dropped future leaves the
-            // connection inside a token (`Connection::inside_token`).
-            this.conn.set_inside_token(true);
 
             let ty = TokenType::try_from(ty_byte)
                 .map_err(|_| Error::Protocol(format!("invalid token type {:x}", ty_byte).into()))?;
@@ -509,7 +506,6 @@ where
                 // rather than silently falling through. Unknown token *bytes*
                 // are already rejected by the `TokenType::try_from` above.
             };
-            this.conn.set_inside_token(false);
 
             Ok(Some((token, this)))
         });
@@ -1074,6 +1070,63 @@ mod tests {
             !matches!(answer, Ok(Ok(_))),
             "a value's FD 20 00 must never be taken for DONE_ATTN after a read dropped inside a token: {answer:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn cancel_request_after_a_flush_dropped_mid_drain_never_takes_the_next_packet_for_the_acknowledgement() {
+        // Astra K4-53 P2: a read is dropped inside a token, the next request's
+        // `flush_stream` starts draining and is dropped too while it waits for
+        // the next packet — and that continuation packet's bytes begin
+        // `FD 20 00 …`. The drain's truncation is no token boundary: the
+        // position stays unknown until the message's end-of-message packet
+        // is consumed, so no acknowledgement is ever claimed from there.
+        let mut payload = vec![0xAAu8];
+        payload.extend_from_slice(&200u16.to_le_bytes()); // an ERROR body promising 200 bytes
+        payload.extend_from_slice(&[0x11u8; 20]); // the first of them
+        let first = packet_bytes_with(&payload, PacketStatus::NormalMessage);
+        let mut continuation = done_token(DONE_ATTN, 0, 0); // the value goes on with bytes that LOOK like the acknowledgement
+        continuation.extend_from_slice(&[0u8; 7]);
+        let second = packet_bytes_with(&continuation, PacketStatus::NormalMessage);
+        let gate = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(first.len()));
+        let mut wire = first.clone();
+        wire.extend_from_slice(&second);
+        let mut conn = Connection::test_over(GatedStream { data: wire, pos: 0, open_to: gate.clone() }, false);
+        let mut cx = TaskContext::from_waker(std::task::Waker::noop());
+        {
+            use futures_util::StreamExt as _;
+            let mut stream = TokenStream::new(&mut conn).try_unfold();
+            assert!(stream.poll_next_unpin(&mut cx).is_pending(), "the read waits inside the ERROR token");
+        } // the read is dropped inside the token
+        {
+            use std::future::Future as _;
+            let mut flush = Box::pin(conn.flush_stream());
+            assert!(flush.as_mut().poll(&mut cx).is_pending(), "the drain waits for the next packet");
+        } // the drain is dropped too
+        // The continuation arrives; the real acknowledgement is held back.
+        gate.store(first.len() + second.len(), std::sync::atomic::Ordering::SeqCst);
+        let answer = tokio::time::timeout(std::time::Duration::from_millis(200), conn.cancel_request()).await;
+        assert!(
+            !matches!(answer, Ok(Ok(_))),
+            "a continuation packet's FD 20 00 must never be taken for DONE_ATTN after a dropped drain: {answer:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn after_a_decoding_error_the_position_stays_unknown_and_no_acknowledgement_is_claimed() {
+        // Fable K4-53 P3: a token that fails to decode leaves the stream
+        // somewhere inside its message. The state stays "position unknown"
+        // (the safe side): the cancel claims no acknowledgement even though
+        // the next bytes would read as DONE_ATTN.
+        let mut payload = vec![0xFFu8]; // no such token type: a decoding error
+        payload.extend_from_slice(&done_token(DONE_ATTN, 0, 0));
+        let mut conn = Connection::test_over(MockStream::new(packet_bytes_with(&payload, PacketStatus::NormalMessage)), false);
+        {
+            use futures_util::TryStreamExt as _;
+            let mut stream = TokenStream::new(&mut conn).try_unfold();
+            stream.try_next().await.expect_err("the unknown token type is a decoding error");
+        }
+        let answer = tokio::time::timeout(std::time::Duration::from_millis(200), conn.cancel_request()).await;
+        assert!(!matches!(answer, Ok(Ok(_))), "no acknowledgement after a decoding error: {answer:?}");
     }
 
     #[tokio::test]
