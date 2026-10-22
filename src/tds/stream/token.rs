@@ -1047,36 +1047,28 @@ mod tests {
     #[tokio::test]
     async fn cancel_request_after_a_read_dropped_inside_a_value_never_takes_its_bytes_for_the_acknowledgement() {
         // Astra K4-52 P2: a stop lands while a token's value streams in. The
-        // first packet holds the start of a token (an ERROR token whose body
-        // promises 100 bytes, here only its first fields); the read is
-        // dropped there. The next packet carries the REST of that value, and
-        // it happens to begin `FD 20 00 …` — exactly a DONE with DONE_ATTN.
-        // The server's real acknowledgement is held back. Parsing from the
-        // dropped read's position would call the cancel acknowledged; it must
-        // never be Ok.
-        let mut head = vec![0xAAu8];
-        head.extend_from_slice(&100u16.to_le_bytes());
-        head.extend_from_slice(&50000u32.to_le_bytes()); // code
-        head.push(1); // state
-        head.push(16); // class — the message's length is still to come
-        let mut rest = done_token(DONE_ATTN, 0, 0); // value bytes that LOOK like the acknowledgement
-        rest.extend_from_slice(&[0u8; 20]);
-        let first = packet_bytes_with(&head, PacketStatus::NormalMessage);
-        let second = packet_bytes_with(&rest, PacketStatus::EndOfMessage);
-        let real_ack = packet_bytes(&done_token(DONE_ATTN, 0, 0));
+        // token here is an ERROR token whose body promises 100 bytes; its
+        // decoder reads the body whole (`read_exact`), so the bytes that
+        // arrived stay in the connection's buffer while it waits for the
+        // rest — and the value begins `FD 20 00 …`, exactly a DONE with
+        // DONE_ATTN. The read is dropped there; the server's real
+        // acknowledgement never arrives (held back). Parsing an
+        // acknowledgement from that position would call the cancel
+        // acknowledged; it must never be Ok. (A ROW's VARBINARY value is
+        // read the same way: the buffer then holds the value's bytes.)
+        let mut payload = vec![0xAAu8];
+        payload.extend_from_slice(&100u16.to_le_bytes());
+        payload.extend_from_slice(&done_token(DONE_ATTN, 0, 0)); // value bytes that LOOK like the acknowledgement
+        payload.extend_from_slice(&[0u8; 7]);
+        let first = packet_bytes_with(&payload, PacketStatus::NormalMessage);
         let gate = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(first.len()));
-        let mut wire = first.clone();
-        wire.extend_from_slice(&second);
-        wire.extend_from_slice(&real_ack);
-        let mut conn = Connection::test_over(GatedStream { data: wire, pos: 0, open_to: gate.clone() }, false);
+        let mut conn = Connection::test_over(GatedStream { data: first, pos: 0, open_to: gate }, false);
         {
             use futures_util::StreamExt as _;
             let mut stream = TokenStream::new(&mut conn).try_unfold();
             let mut cx = TaskContext::from_waker(std::task::Waker::noop());
-            assert!(stream.poll_next_unpin(&mut cx).is_pending(), "the read waits inside the ERROR token for its message");
+            assert!(stream.poll_next_unpin(&mut cx).is_pending(), "the read waits inside the ERROR token for the rest of its value");
         } // the read is dropped here, inside the token
-        // The rest of the value arrives; the real acknowledgement is held back.
-        gate.store(first.len() + second.len(), std::sync::atomic::Ordering::SeqCst);
         let answer = tokio::time::timeout(std::time::Duration::from_millis(200), conn.cancel_request()).await;
         assert!(
             !matches!(answer, Ok(Ok(_))),
