@@ -959,6 +959,44 @@ mod tests {
             "with no command timeout the read should stay pending on the stalled server"
         );
     }
+    // --- (f) the Attention's acknowledgement (TOAD-43, 22/10) --------------
+    // DONE_ATTN is bit 5 (0x0020) of the DONE status; DONE_FINAL is 0x0000.
+    const DONE_ATTN: u16 = 0x0020;
+
+    #[tokio::test]
+    async fn cancel_request_takes_the_acknowledgement_in_the_same_message() {
+        // [DONE][DONE+ATTN] in ONE message: the acknowledgement is taken and
+        // the connection is left at the end of it.
+        let mut payload = done_token(0, 0, 0);
+        payload.extend_from_slice(&done_token(DONE_ATTN, 0, 0));
+        let mut conn = conn_over(&payload);
+        let done = conn.cancel_request().await.expect("acknowledged in the same message");
+        assert!(done.is_attention());
+        assert!(conn.is_eof(), "nothing of the cancelled request is left for the next one");
+    }
+
+    #[tokio::test]
+    async fn cancel_request_reads_on_to_an_acknowledgement_in_a_message_of_its_own() {
+        // [DONE] EOM, then [DONE+ATTN] EOM — what a live SQL Server 2022 sends
+        // after an Attention on a waiting request. The first message ending is
+        // not the end of the cancel: the second message is read too, and the
+        // acknowledgement is never left for the next request to read as its
+        // own answer.
+        let mut wire = packet_bytes(&done_token(0, 0, 0));
+        wire.extend_from_slice(&packet_bytes(&done_token(DONE_ATTN, 0, 0)));
+        let mut conn = Connection::test_over(MockStream::new(wire), false);
+        let done = conn.cancel_request().await.expect("acknowledged in a message of its own");
+        assert!(done.is_attention());
+        assert!(conn.is_eof(), "the acknowledgement was consumed here, not by the next request");
+    }
+
+    #[tokio::test]
+    async fn cancel_request_without_an_acknowledgement_never_answers_ok() {
+        // [DONE] EOM and then nothing (the connection ends): never an Ok — the
+        // cancel is not acknowledged and says so.
+        let mut conn = conn_over(&done_token(0, 0, 0));
+        conn.cancel_request().await.expect_err("no DONE_ATTN, no Ok");
+    }
 }
 
 // Server-free tests for the `RoundTripTimeout` stream combinator that backs
@@ -1162,42 +1200,4 @@ mod round_trip_timeout_tests {
         assert!(is_timed_out(&err), "expected TimedOut, got: {err:?}");
     }
 
-    // --- (f) the Attention's acknowledgement (TOAD-43, 22/10) --------------
-    // DONE_ATTN is bit 5 (0x0020) of the DONE status; DONE_FINAL is 0x0000.
-    const DONE_ATTN: u16 = 0x0020;
-
-    #[tokio::test]
-    async fn cancel_request_takes_the_acknowledgement_in_the_same_message() {
-        // [DONE][DONE+ATTN] in ONE message: the acknowledgement is taken and
-        // the connection is left at the end of it.
-        let mut payload = done_token(0, 0, 0);
-        payload.extend_from_slice(&done_token(DONE_ATTN, 0, 0));
-        let mut conn = conn_over(&payload);
-        let done = conn.cancel_request().await.expect("acknowledged in the same message");
-        assert!(done.is_attention());
-        assert!(conn.is_eof(), "nothing of the cancelled request is left for the next one");
-    }
-
-    #[tokio::test]
-    async fn cancel_request_reads_on_to_an_acknowledgement_in_a_message_of_its_own() {
-        // [DONE] EOM, then [DONE+ATTN] EOM — what a live SQL Server 2022 sends
-        // after an Attention on a waiting request. The first message ending is
-        // not the end of the cancel: the second message is read too, and the
-        // acknowledgement is never left for the next request to read as its
-        // own answer.
-        let mut wire = packet_bytes(&done_token(0, 0, 0));
-        wire.extend_from_slice(&packet_bytes(&done_token(DONE_ATTN, 0, 0)));
-        let mut conn = Connection::test_over(MockStream::new(wire), false);
-        let done = conn.cancel_request().await.expect("acknowledged in a message of its own");
-        assert!(done.is_attention());
-        assert!(conn.is_eof(), "the acknowledgement was consumed here, not by the next request");
-    }
-
-    #[tokio::test]
-    async fn cancel_request_without_an_acknowledgement_never_answers_ok() {
-        // [DONE] EOM and then nothing (the connection ends): never an Ok — the
-        // cancel is not acknowledged and says so.
-        let mut conn = conn_over(&done_token(0, 0, 0));
-        conn.cancel_request().await.expect_err("no DONE_ATTN, no Ok");
-    }
 }
