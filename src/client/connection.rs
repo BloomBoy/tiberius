@@ -457,7 +457,27 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         self.flush_sink().await?;
         self.poisoned = false;
 
-        TokenStream::new(self).flush_done_attention().await
+        // The acknowledgement is the DONE with `DONE_ATTN`, and it need not be
+        // in the first message: a live SQL Server 2022 ends the interrupted
+        // request's response message first and acknowledges in a message of
+        // its own (TOAD-43, 22/10). Reading only the first message gave up on
+        // a cancel the server had carried out and left the acknowledgement on
+        // the wire for the NEXT request to read as its own (empty) answer. So
+        // every message is drained until the acknowledgement; the caller
+        // bounds the wait.
+        loop {
+            if let Some(done) = TokenStream::new(self).flush_done_attention().await? {
+                return Ok(done);
+            }
+            if !self.flushed {
+                return Err(crate::Error::Protocol(
+                    "Never got a DONE token acknowledging the Attention signal.".into(),
+                ));
+            }
+            // The message ended without it: the next message is still the
+            // cancelled request's, so read it too.
+            self.flushed = false;
+        }
     }
 
     /// Cleans the packet stream from previous use. It is important to use the

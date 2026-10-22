@@ -213,12 +213,14 @@ where
         }
     }
 
-    /// Drain the token stream after a client Attention signal has been sent,
-    /// discarding every remaining token of the cancelled request until the
-    /// acknowledging DONE token (with the `DONE_ATTN` status bit set) is
-    /// received, per MS-TDS section 2.2.1.6. Returns that DONE token so the
-    /// connection is left clean and ready for reuse.
-    pub(crate) async fn flush_done_attention(self) -> crate::Result<TokenDone> {
+    /// Drain ONE response message after a client Attention signal has been
+    /// sent, discarding every remaining token of the cancelled request, and
+    /// return the acknowledging DONE token (with the `DONE_ATTN` status bit
+    /// set, MS-TDS section 2.2.1.6) when this message carries it. `None` when
+    /// the message ended without it: the server answers the interrupted
+    /// request's response first and the acknowledgement may come in a message
+    /// of its own, which the caller reads next ([`Connection::cancel_request`]).
+    pub(crate) async fn flush_done_attention(self) -> crate::Result<Option<TokenDone>> {
         let mut stream = self.try_unfold();
 
         loop {
@@ -228,14 +230,10 @@ where
                 | Some(ReceivedToken::DoneInProc(token))
                     if token.is_attention() =>
                 {
-                    return Ok(token);
+                    return Ok(Some(token));
                 }
                 Some(_) => (),
-                None => {
-                    return Err(crate::Error::Protocol(
-                        "Never got a DONE token acknowledging the Attention signal.".into(),
-                    ))
-                }
+                None => return Ok(None),
             }
         }
     }
@@ -1162,5 +1160,44 @@ mod round_trip_timeout_tests {
             .expect("a timeout error is expected")
             .expect_err("a zero bound must trip on the first stall");
         assert!(is_timed_out(&err), "expected TimedOut, got: {err:?}");
+    }
+
+    // --- (f) the Attention's acknowledgement (TOAD-43, 22/10) --------------
+    // DONE_ATTN is bit 5 (0x0020) of the DONE status; DONE_FINAL is 0x0000.
+    const DONE_ATTN: u16 = 0x0020;
+
+    #[tokio::test]
+    async fn cancel_request_takes_the_acknowledgement_in_the_same_message() {
+        // [DONE][DONE+ATTN] in ONE message: the acknowledgement is taken and
+        // the connection is left at the end of it.
+        let mut payload = done_token(0, 0, 0);
+        payload.extend_from_slice(&done_token(DONE_ATTN, 0, 0));
+        let mut conn = conn_over(&payload);
+        let done = conn.cancel_request().await.expect("acknowledged in the same message");
+        assert!(done.is_attention());
+        assert!(conn.is_eof(), "nothing of the cancelled request is left for the next one");
+    }
+
+    #[tokio::test]
+    async fn cancel_request_reads_on_to_an_acknowledgement_in_a_message_of_its_own() {
+        // [DONE] EOM, then [DONE+ATTN] EOM — what a live SQL Server 2022 sends
+        // after an Attention on a waiting request. The first message ending is
+        // not the end of the cancel: the second message is read too, and the
+        // acknowledgement is never left for the next request to read as its
+        // own answer.
+        let mut wire = packet_bytes(&done_token(0, 0, 0));
+        wire.extend_from_slice(&packet_bytes(&done_token(DONE_ATTN, 0, 0)));
+        let mut conn = Connection::test_over(MockStream::new(wire), false);
+        let done = conn.cancel_request().await.expect("acknowledged in a message of its own");
+        assert!(done.is_attention());
+        assert!(conn.is_eof(), "the acknowledgement was consumed here, not by the next request");
+    }
+
+    #[tokio::test]
+    async fn cancel_request_without_an_acknowledgement_never_answers_ok() {
+        // [DONE] EOM and then nothing (the connection ends): never an Ok — the
+        // cancel is not acknowledged and says so.
+        let mut conn = conn_over(&done_token(0, 0, 0));
+        conn.cancel_request().await.expect_err("no DONE_ATTN, no Ok");
     }
 }
